@@ -1,0 +1,110 @@
+name: Build Android APK from ZIP
+
+on:
+  workflow_dispatch:  # التشغيل اليدوي من تبويب Actions
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'app-source.zip'  # يشتغل أوتوماتيكياً إذا تعدّل الـ ZIP فقط
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ─── 1. جلب المستودع ─────────────────────────────
+      - name: ✅ جلب الملفات من المستودع
+        uses: actions/checkout@v4
+
+      # ─── 2. التحقق من ملف ZIP ─────────────────────────
+      - name: 🔍 التحقق من وجود وسلامة ملف الـ ZIP
+        run: |
+          ZIP_FILE="app-source.zip"
+          
+          if [[ ! -f "$ZIP_FILE" ]]; then
+            echo "❌ خطأ: ملف $ZIP_FILE غير موجود في جذر المستودع!"
+            exit 1
+          fi
+          
+          # نتحقق إنّ الملف ZIP مضغوط صح وما فيه أخطاء
+          unzip -t "$ZIP_FILE"
+          echo "✅ ملف ZIP سليم وتم التحقق منه بنجاح."
+
+      # ─── 3. فك الضغط ───────────────────────────────────
+      - name: 📦 فك ضغط ملف ZIP
+        run: |
+          mkdir -p extracted_app
+          unzip -q app-source.zip -d extracted_app/
+          echo "📂 المحتويات بعد فك الضغط:"
+          ls -R extracted_app/
+
+      # ─── 4. إيجاد مجلد المشروع (اللي فيه gradlew) ──────
+      - name: 🗂️ تحديد مسار مشروع Android
+        id: project-path
+        run: |
+          # نبحث عن ملف gradlew داخل المجلد المستخرج
+          GRADLEW_PATH=$(find extracted_app/ -name "gradlew" -type f | head -n 1)
+          
+          if [[ -z "$GRADLEW_PATH" ]]; then
+            echo "❌ خطأ: ما لقينا 'gradlew' داخل الملف المضغوط!"
+            echo "تأكد إنّ ملف ZIP لما ينفك يطلع مجلد فيه مشروع Gradle صحيح."
+            exit 1
+          fi
+          
+          PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+          echo "dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          echo "✅ لقينا مشروع Android في: $PROJECT_DIR"
+
+      # ─── 5. إعداد بيئة Java ───────────────────────────
+      - name: ☕ إعداد JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ─── 6. إعداد Android SDK ─────────────────────────
+      - name: 🤖 إعداد Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ─── 7. صلاحية التنفيذ لـ Gradlew ─────────────────
+      - name: ⚡ منح صلاحية التنفيذ لـ gradlew
+        working-directory: ${{ steps.project-path.outputs.dir }}
+        run: chmod +x gradlew
+
+      # ─── 8. بناء الـ APK ───────────────────────────────
+      # ملاحظة: assembleDebug ما يحتاج توقيع (keystore).
+      # إذا بدك Release APK موقع، لازم تضيف خطوات التوقيع.
+      - name: 🏗️ بناء ملف APK (Debug)
+        working-directory: ${{ steps.project-path.outputs.dir }}
+        run: ./gradlew assembleDebug --no-daemon
+
+      # ─── 9. التحقق من APK الناتج ───────────────────────
+      - name: 🔍 التأكد من سلامة ملف APK
+        id: apk-check
+        run: |
+          # نبحث عن أي ملف APK ناتج
+          APK_FILE=$(find ${{ steps.project-path.outputs.dir }} -name "*.apk" | head -n 1)
+          
+          if [[ -z "$APK_FILE" ]]; then
+            echo "❌ خطأ: ما تولّد ملف APK!"
+            exit 1
+          fi
+          
+          # نتحقق إنّ الملف فعلياً فيه محتوى (غير فارغ)
+          FILE_SIZE=$(stat -c%s "$APK_FILE")
+          if [[ "$FILE_SIZE" -eq 0 ]]; then
+            echo "❌ خطأ: ملف APK موجود بس حجمه صفر!"
+            exit 1
+          fi
+          
+          echo "✅ APK تولد بنجاح: $APK_FILE"
+          echo "📦 الحجم: $FILE_SIZE bytes"
+          echo "apk_path=$APK_FILE" >> $GITHUB_OUTPUT
+
+      # ─── 10. رفع APK كـ Artifact ───────────────────────
+      - name: 📤 رفع ملف APK للتحميل
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-app-apk
+          path: ${{ steps.apk-check.outputs.apk_path }}
+          if-no-files-found: error
